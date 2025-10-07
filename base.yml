@@ -1,0 +1,97 @@
+---
+- name: Minimal setup
+  hosts: all
+  become: true
+  gather_facts: true
+
+  vars_files:
+    - vars.yml
+
+  tasks:
+    - name: Upgrade packages
+      apt:
+        update_cache: yes
+        upgrade: yes
+
+    - name: Create sudo users
+      user:
+        name: "{{ item.name }}"
+        shell: /bin/bash
+        groups: sudo
+        append: true
+        create_home: true
+      loop: "{{ users }}"
+
+    - name: Install SSH public keys
+      authorized_key:
+        user: "{{ item.name }}"
+        key: "{{ item.public_key }}"
+        state: present
+      loop: "{{ users }}"
+
+    - name: Add sudoers drop-ins
+      copy:
+        dest: "/etc/sudoers.d/90-{{ item.name }}"
+        mode: "0440"
+        content: "{{ item.name }} ALL=(ALL) {{ 'NOPASSWD:' if item.nopasswd else '' }}ALL"
+      loop: "{{ users }}"
+
+    - name: Ensure sshd drop-in dir exists
+      file:
+        path: /etc/ssh/sshd_config.d
+        state: directory
+        mode: "0755"
+
+    - name: Apply SSH configuration
+      copy:
+        dest: /etc/ssh/sshd_config.d/99-ssh.conf
+        mode: "0644"
+        content: |
+          Port {{ new_ssh_port }}
+          PermitRootLogin no
+          PasswordAuthentication no
+          PubkeyAuthentication yes
+          ChallengeResponseAuthentication no
+          UsePAM yes
+      notify:
+        - systemd daemon-reload
+        - Restart ssh
+
+    - name: Install UFW
+      apt:
+        name: ufw
+        state: present
+
+    - name: UFW allow new SSH port
+      community.general.ufw:
+        rule: allow
+        port: "{{ new_ssh_port }}"
+        proto: tcp
+
+    - name: UFW default deny incoming + enable
+      community.general.ufw:
+        direction: incoming
+        policy: deny
+        state: enabled
+
+    - name: Ensure UFW enabled (idempotent)
+      community.general.ufw:
+        state: enabled
+
+    - name: Set timezone
+      command: timedatectl set-timezone {{ timezone }}
+      changed_when: false
+
+    - name: Enable NTP time sync
+      command: timedatectl set-ntp true
+      changed_when: false
+
+  handlers:
+    - name: systemd daemon-reload
+      systemd:
+        daemon_reload: true
+
+    - name: Restart ssh
+      service:
+        name: ssh
+        state: restarted
